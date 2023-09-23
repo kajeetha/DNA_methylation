@@ -1,0 +1,344 @@
+Pipeline outline
+
+--
+
+  + Downloaded the reference genome
+
+--
+
+  + Indexed the reference genome #
+
+--
+
+  + Copied fastq files from a shared folder
+"FASTQC" used to assess quality of FASTQ files 
+--
+
+  + Trimmed the fastq files with trim galore
+"FASTQC" performed again after removing adaptors
+--
+
+  + Aligned to the reference genome with bwa-meth
+"samtools flagstat" used to assess the percent of uniquely aligned reads
+--
+
+  + Extracted CpG methylation estimates
+
+--
++ Identifyied differentially methylated regions
+ 
+
+--
+
+  + Investigated genes affected by differential methylation (this was done plugging DMR regions in UCSC genome browser)
+
+
+---
+## Step 1: Data access — Indexing BWA-meth
+
+* Downloaded FASTA file of chr21
+
+```{bash eval=FALSE}
+mkdir -p $SCRATCH/Ref
+cd $SCRATCH/Ref
+wget ftp://ftp.ensembl.org/pub/release-96/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.chromosome.21.fa.gz
+zcat Homo_sapiens.GRCh38.dna.chromosome.21.fa.gz | sed 's/>21/>chr21/' > Homo_sapiens.GRCh38.dna.chromosome.21.fa
+```
+
+* Indexed FASTA file
+```{bash eval=FALSE}
+salloc
+module load anaconda3 gcc java fastqc cutadapt trimgalore bwa samtools bwameth htslib methyldackel
+bwameth.py index Homo_sapiens.GRCh38.dna.chromosome.21.fa
+```
+
+
+## Step 2 Data access — Download CpG islands
+
+* Visited http://genome.ucsc.edu
+
+* Selected the 3rd tool, _Table Browser_ 
+
+* Selected the correct genome assembly(GRCh38/hg38), and group _Regulation_
+
+* Selected the _CpG Islands_ track
+
+* Under position, typed chr21
+
+* Selected the output format as _BED - browser extensible data_
+
+* Saved the file as: _hg38CpgIslandsForChr21.bed_
+
+* Used scp to transfer the file to $SCRATCH/Datasets (first mkdir $SCRATCH/Datasets)
+
+```{bash eval=FALSE}
+# From the local computer
+scp ~/Desktop/hg38CpgIslandsForChr21.bed lcl_uotmmg3003s2053lcl_uotmmg3003s2053@teach.scinet.utoronto.ca:/scratch/l/lcl_uotmmg3003/lcl_uotmmg3003s2053/Datasets
+```
+
+
+---
+## Step 3: Data access — Downloading necessary files
+
+
+* Copied the fastq files to my scratch folder:
+
+```{bash eval=FALSE}
+cp -rf /scratch/m/mhoffman/karimzad/newFastqFilesChr21 $SCRATCH
+```
+
+
+## Step 4: Trimming — Trimmed the FASTQ files
+
+
+```{bash eval=FALSE}
+LOGDIR=$SCRATCH/Logs 
+SCRIPTDIR=$SCRATCH/Scripts 
+mkdir -p $SCRIPTDIR $LOGDIR
+cd $SCRIPTDIR
+FASTQDIR=$SCRATCH/newFastqFilesChr21
+FQFOLDERS=($(ls $FASTQDIR))
+OUTMAIN=$SCRATCH/trimmedFastqsChr21
+for FQFOLDER in ${FQFOLDERS[@]}
+do
+  FQ1=$FASTQDIR/$FQFOLDER/$FQFOLDER\__1.fastq.gz
+  FQ2=$FASTQDIR/$FQFOLDER/$FQFOLDER\__2.fastq.gz
+  OUTDIR=$OUTMAIN/$FQFOLDER
+  mkdir -p $OUTDIR
+  echo -e '#!/bin/sh' > $SCRATCH/Scripts/$FQFOLDER\_TrimGalore.sh
+  echo "module load anaconda3 gcc java fastqc cutadapt trimgalore bwa samtools bwameth htslib methyldackel" >> $SCRATCH/Scripts/$FQFOLDER\_TrimGalore.sh
+  echo "trim_galore --fastqc --paired --gzip -o $OUTDIR $FQ1 $FQ2" >> $SCRATCH/Scripts/$FQFOLDER\_TrimGalore.sh
+  sbatch -c 1 -t 1:00:00 -e $LOGDIR/$FQFOLDER\_TrimGalore.%A.ERR -o  $LOGDIR/$FQFOLDER\_TrimGalore.%A.LOG $SCRIPTDIR/$FQFOLDER\_TrimGalore.sh
+done
+```
+
+---
+## Step 5: Quality control — FASTQC reports
+
+
+```{bash eval=FALSE}
+scp -r lcl_uotmmg3003s2053lcl_uotmmg3003s2053@teach.scinet.utoronto.ca:/scratch/l/lcl_uotmmg3003/lcl_uotmmg3003s2053/trimmedFastqsChr21 ~/Desktop
+```
+
+
+
+```
+
+---
+## Step 6-  Alignment — Aligned with BWA-Meth #regular bed file the 4th column is a name but in this case its a number. 
+
+```{bash eval=FALSE}
+LOGDIR=$SCRATCH/Logs; SCRIPTDIR=$SCRATCH/Scripts; cd $SCRIPTDIR
+REF=$SCRATCH/Ref/Homo_sapiens.GRCh38.dna.chromosome.21.fa
+FASTQDIR=$SCRATCH/trimmedFastqsChr21
+BAMDIR=$SCRATCH/trimmedAlignedBamsChr21
+mkdir -p $BAMDIR
+mkdir -p $SCRIPTDIR
+SAMPLES=($(ls $FASTQDIR))
+for SAMPLE in ${SAMPLES[@]}
+do
+  FQ1=$(ls $FASTQDIR/$SAMPLE | grep val_1.fq.gz) 
+  FQ2=$(ls $FASTQDIR/$SAMPLE | grep val_2.fq.gz) 
+  echo -e '#!/bin/sh' > $SCRIPTDIR/$SAMPLE\_Align.sh 
+  echo "module load anaconda3 gcc java fastqc cutadapt trimgalore bwa samtools bwameth htslib methyldackel" >> $SCRIPTDIR/$SAMPLE\_Align.sh
+  echo "bwameth.py --reference $REF $FASTQDIR/$SAMPLE/$FQ1 $FASTQDIR/$SAMPLE/$FQ2 | samtools view -bS -F 4 > $BAMDIR/$SAMPLE.bam" >> $SCRIPTDIR/$SAMPLE\_Align.sh
+  sbatch -c 1 -t 4:00:00 -e $LOGDIR/$SAMPLE\_Align.%A.ERR -o $LOGDIR/$SAMPLE\_Align.%A.LOG $SCRIPTDIR/$SAMPLE\_Align.sh
+done
+```
+
+---
+
+
+## Step 7: Alignment — Copied, Sorted and indexed the bam files
+
+
+* MethylDackel requires sorted and indexed bam files
+
+
+```{bash eval=FALSE}
+LOGDIR=$SCRATCH/Logs; SCRIPTDIR=$SCRATCH/Scripts; cd $SCRIPTDIR
+BAMDIR=$SCRATCH/trimmedAlignedBamsChr21
+BAMFILES=($(ls $BAMDIR | grep .bam | grep -v bam.bai | grep -v sorted))
+for BAMFILE in ${BAMFILES[@]}
+do
+  SAMPLENAME=$(echo $BAMFILE | sed 's/.bam//')
+  echo -e '#!/bin/sh' > $SCRATCH/Scripts/$SAMPLENAME\_sortAndIndex.sh
+  echo "module load anaconda3 gcc java fastqc cutadapt trimgalore bwa samtools bwameth htslib methyldackel" >> $SCRATCH/Scripts/$SAMPLENAME\_sortAndIndex.sh
+  echo "samtools sort $BAMDIR/$BAMFILE -o $BAMDIR/$SAMPLENAME\_sorted.bam" >> $SCRATCH/Scripts/$SAMPLENAME\_sortAndIndex.sh
+  echo "samtools index $BAMDIR/$SAMPLENAME\_sorted.bam" >> $SCRATCH/Scripts/$SAMPLENAME\_sortAndIndex.sh
+  sbatch -c 1 -t 1:00:00 -e $LOGDIR/sortIndex.%A.ERR -o $LOGDIR/sortIndex.%A.LOG $SCRATCH/Scripts/$SAMPLENAME\_sortAndIndex.sh
+done
+```
+
+---
+## Step 8: Extracted estimates by running MethylDackel (extract cytosine methylation counts)
+
+
+```{bash eval=FALSE}
+LOGDIR=$SCRATCH/Logs; SCRIPTDIR=$SCRATCH/Scripts; cd $SCRIPTDIR
+BAMDIR=$SCRATCH/trimmedAlignedBamsChr21; OUTMAIN=$SCRATCH/methylDackelOutputChr21
+BAMFILES=($(ls $BAMDIR | grep sorted | grep -v bai | grep bam))
+REF=$SCRATCH/Ref/Homo_sapiens.GRCh38.dna.chromosome.21.fa
+for BAMFILE in ${BAMFILES[@]}
+do
+  SAMPLENAME=$(echo $BAMFILE | sed 's/_sorted.bam//')
+  OUTDIR=$OUTMAIN/$SAMPLENAME
+  mkdir -p $OUTDIR
+  echo -e '#!/bin/sh' > $SCRIPTDIR/MethylDackel_$SAMPLENAME.sh
+  echo "module load anaconda3 gcc java fastqc cutadapt trimgalore bwa samtools bwameth htslib methyldackel" >> $SCRIPTDIR/MethylDackel_$SAMPLENAME.sh
+  echo "MethylDackel extract --fraction --mergeContext $REF $BAMDIR/$BAMFILE -o $OUTDIR/$SAMPLENAME\_" >> $SCRIPTDIR/MethylDackel_$SAMPLENAME.sh
+  sbatch -c 1 -t 1:00:00 -e $LOGDIR/Meth.%A.ERR -o $LOGDIR/Meth.%A.LOG $SCRIPTDIR/MethylDackel_$SAMPLENAME.sh
+done
+```
+
+
+
+---
+## Step 9: Extracting estimates — Explored the output of MethylDackel
+
+
+```{r eval=FALSE}
+track type="bedGraph" description="/scratch/l/lcl_uotmmg3003/lcl_uotmmg3003s2053/methylDackelOutputChr21/H1-hESC_rep1/H1-hESC_rep1_ CpG merged methylation fractions"
+chr21	5217430	5217432	1.000000
+chr21	5217445	5217447	0.000000
+chr21	5217480	5217482	1.000000
+chr21	5217620	5217622	1.000000
+chr21	5218240	5218242	1.000000
+chr21	5218676	5218678	0.000000
+chr21	5218883	5218885	0.500000
+chr21	5218930	5218932	0.000000
+chr21	5220613	5220615	1.000000
+```
+
+
+
+---
+## Step 10: Extracted estimates with bigWig format since it can store and retrieve random genomic signals effeciently compared to bedGraph.
+
+* Here I download a program called bedGraphToBigWig and usde it to convert the bedGraph files
+
+
+```{bash eval=FALSE}
+mkdir -p ~/software/bin
+cd ~/software/bin
+wget http://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/bedGraphToBigWig
+
+chmod u+x bedGraphToBigWig
+```
+
+---
+## Step 11: Extracted estimates — Found size of chromosomes
+
+* because bedGraphToBigWig requires a file with information of how long each chromosome is
+
+```{bash eval=FALSE}
+cd ~/software/bin
+wget http://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/fetchChromSizes
+chmod u+x fetchChromSizes
+./fetchChromSizes hg38 > $SCRATCH/Ref/hg38.chromsizes
+```
+
+
+---
+## Step 12: Extracting estimates — Converted output of methylDakel (bedGraph) to bigWig by using arrays
+
+```{bash eval=FALSE}
+salloc
+MAINDIR=$SCRATCH/methylDackelOutputChr21
+SAMPLES=($(ls $MAINDIR))
+for SAMPLE in ${SAMPLES[@]}
+do
+  BDG=$(ls $MAINDIR/$SAMPLE | grep bedGraph)
+  BW=$(echo $BDG | sed 's/bedGraph/bigWig/')
+  ~/software/bin/bedGraphToBigWig $MAINDIR/$SAMPLE/$BDG $SCRATCH/Ref/hg38.chromsizes $MAINDIR/$SAMPLE/$BW
+done
+```
+
+---
+## Step 13: Identified DMRs using Metilene
+
+
+* Metilene requires a union file of bedGraphs that I generated earlier with MethylDackel with the following columns:
+
+```{r eval=FALSE}
+Chrom  Start  End  G1_1  G1_2  G2_1  G2_2
+```
+
+---
+The input file can be generated:
+
+
+```{bash eval=FALSE}
+MAINDIR=$SCRATCH/methylDackelOutputChr21
+SAMPLES=($(ls $MAINDIR))
+BGS=()
+HEADER=(chr start end)
+for SAMPLE in ${SAMPLES[@]}
+do
+  HEADER+=($SAMPLE)
+  BG=$(ls $MAINDIR/$SAMPLE | grep bedGraph)
+  BGS+=($MAINDIR/$SAMPLE/$BG)
+done
+module load gcc/7.3.0 bedtools
+echo -e ${HEADER[@]} | tr " " "\t" > $SCRATCH/methylDackelOutputChr21/mergedOutputs_unionbedg.bed
+bedtools unionbedg -i ${BGS[@]} >> $SCRATCH/methylDackelOutputChr21/mergedOutputs_unionbedg.bed
+```
+
+
+```{bash eval=FALSE}
+module load metilene
+OUTDIR=$SCRATCH/metileneOutputChr21
+mkdir -p $OUTDIR
+echo -e "Chrom\tStart\tEnd\tqVal\tmeanDiff\tnumCpgs\tpMWU\tp2DKS\tmeanG1\tmeanG2" > $OUTDIR/MetileneDMR.bed
+metilene -a "H1-hESC" -b "leftVentricle" $SCRATCH/methylDackelOutputChr21/mergedOutputs_unionbedg.bed >> $OUTDIR/MetileneDMR.bed
+```
+
+Step 14: copy MetileneDMR bed file to desktop to analyze in R and find associated genes with UCSC
+```{bash eval=FALSE}
+
+scp lcl_uotmmg3003s2053@teach.scinet.utoronto.ca:/scratch/l/lcl_uotmmg3003/lcl_uotmmg3003s2053/metileneOutputChr21/MetileneDMR.bed ~/Desktop
+
+#in R: 
+
+a = read.csv("MetileneDMR.bed", header = T, sep = "\t")
+a = a[order(a$qVal, decreasing = FALSE), ]
+
+head(a)
+
+ Chrom    Start      End    qVal  meanDiff numCpgs    pMWU   p2DKS   meanG1  meanG2
+21  chr21  8401719  8401775 1.4e-07  0.859375      16 3.6e-11 4.4e-12 0.890620 0.03125
+30  chr21  8452023  8452155 8.4e-04 -0.565686      17 2.6e-08 2.7e-08 0.385290 0.95098
+152 chr21 19214026 19214299 5.9e-03 -0.458333      22 2.3e-07 1.9e-07 0.045455 0.50379
+72  chr21 10119077 10119241 2.0e-02  0.748849      10 1.9e-06 6.4e-07 0.798850 0.05000
+211 chr21 26742501 26742774 2.1e-02 -0.628472      12 1.1e-06 6.9e-07 0.041667 0.67014
+365 chr21 39485748 39485908 1.1e-01  0.808333      10 1.7e-06 3.4e-06 0.858330 0.05000
+#qVal < 0.05 are the statistically significant DMRs
+#These 5 regions were put into UCSC genome browser, genome assembly(GRCh38/hg38) and zoomed out 10x 3 times to see closely associated genes all tracks except NCBI RefSeq was hidden. 
+```
+
+---
+## Step 15: Pathway analysis finding which genes overlap with the DMRs and which biological pathways are regulated by those genes then compute statistical signficance of the overlap. 
+
+http://great.stanford.edu/public/html/
+
+I explored hundreds of genomic regions for specific features, enrichments, etc. with DeepTools  program called _computeMatrix_. computeMatrix accepts signal files (e.g. in bigWig) and genomic region annotations (e.g. in BED or GTF) to calculate summary statistics
+
+
+```{bash eval=FALSE}
+MAINDIR=$SCRATCH/methylDackelOutputChr21
+SAMPLES=($(ls $MAINDIR))
+BWS=()
+for SAMPLE in ${SAMPLES[@]}
+do
+  BW=$(ls $MAINDIR/$SAMPLE | grep bigWig)
+  BWS+=($MAINDIR/$SAMPLE/$BW)
+done
+module load anaconda2/5.1.0 deeptools/3.2.1-anaconda2
+OUTDIR=$SCRATCH/methylationMatricesChr21
+mkdir -p $OUTDIR
+computeMatrix reference-point -R $SCRATCH/Datasets/_hg38CpgIslandsForChr21.bed_ -S ${BWS[@]} -o $OUTDIR/mergedMethylationAroundIslands.tsv.gz --referencePoint TES --skipZeros --sortRegions descend --sortUsingSamples 1
+plotProfile -m $OUTDIR/mergedMethylationAroundIslands.tsv.gz -out $OUTDIR/mergedMethylationAroundIslands_1.pdf 
+plotProfile -m $OUTDIR/mergedMethylationAroundIslands.tsv.gz --perGroup --plotType heatmap -out $OUTDIR/mergedMethylationAroundIslands_2.pdf 
+
+```
+
